@@ -2,6 +2,7 @@ import json
 import csv
 from datetime import datetime, timedelta
 import os
+import zipfile
 
 from sierra_db import execute_query_yield_rows, get_cursor
 from chpl_email import send_email
@@ -13,14 +14,14 @@ try:
         dsn = config['dsn']
 except Exception as e:
     print(e)
-    
+
 directory = "./output"
 
 # Check if the directory exists
 if not os.path.exists(directory):
     # If the directory doesn't exist, create it
     os.makedirs(directory)
-    
+
 # Get the current date and format it as a string
 date_str = datetime.now().strftime("%Y-%m-%d")
 
@@ -36,37 +37,37 @@ with data as (
         h.id,
         -- h.record_id as item_record_id,
         (
-            select 
-                v.field_content 
+            select
+                v.field_content
             from
                 sierra_view.varfield as v
-            where 
+            where
                 v.record_id = h.record_id
                 and v.varfield_type_code = 'b'
-            order by 
-                v.occ_num 
+            order by
+                v.occ_num
             limit 1
         ) as item_barcode,
         --h.patron_record_id ,
         (
             select
                 json_agg(v.field_content order by v.occ_num)
-            from 
+            from
                 sierra_view.varfield as v
-            where 
-                v.record_id = h.patron_record_id 
+            where
+                v.record_id = h.patron_record_id
                 and v.varfield_type_code = 'b'
             -- order by 
-            --     v.occ_num 
+            --     v.occ_num
             -- limit 1
         ) as patron_barcode,
         pr.ptype_code as ptype,
         (
-            select 
+            select
                 rm2.record_type_code || rm2.record_num || 'a'
-            from 
-                sierra_view.record_metadata as rm2 
-            where 
+            from
+                sierra_view.record_metadata as rm2
+            where
                 rm2.id = h.record_id
         ) as item_record_num,
         i.item_status_code ,
@@ -75,30 +76,30 @@ with data as (
         c.checkout_gmt ,
         c.loanrule_code_num ,
         (
-            select 
+            select
                 rm2.record_type_code || rm2.record_num || 'a'
-            from 
-            sierra_view.record_metadata as rm2 
-            where 
-                rm2.id = vrirl.volume_record_id 
+            from
+            sierra_view.record_metadata as rm2
+            where
+                rm2.id = vrirl.volume_record_id
             limit 1
         ) as vol_record,
         --brp.bib_record_id ,
         (
-            select 
+            select
                 rm2.record_type_code || rm2.record_num || 'a'
-            from 
+            from
                 sierra_view.record_metadata as rm2
-            where 
-                rm2.id = brirl.bib_record_id 
+            where
+                rm2.id = brirl.bib_record_id
             limit 1
         ) as bib_record_num,
         (
-            select 
-                v.field_content 
-            from 
+            select
+                v.field_content
+            from
                 sierra_view.varfield as v
-            where 
+            where
                 v.record_id = vrirl.volume_record_id
                 and v.varfield_type_code = 'v'
         ) as volume_statement,
@@ -107,15 +108,15 @@ with data as (
         --vrirl.volume_record_id ,
         h.placed_gmt,
         (
-            select 
+            select
                 coalesce(prf.last_name || ', ', '')
                     || coalesce(prf.first_name  || ' ', '')
                     || coalesce(prf.middle_name, '')
-            from 
+            from
                 sierra_view.patron_record_fullname as prf
-            where 
+            where
                 prf.patron_record_id = h.patron_record_id
-            order by 
+            order by
                 prf.id
             limit 1
         ) as full_name,
@@ -123,22 +124,22 @@ with data as (
         brp.best_title ,
         brp.best_author,
         h.note
-    from 
+    from
         sierra_view.hold as h
         join sierra_view.record_metadata as rm on (
-            rm.id = h.record_id 
+            rm.id = h.record_id
             and rm.record_type_code = 'i'   -- limit to item-level
             and rm.campus_code = ''         -- item is not a "virtual" item
         )
         join sierra_view.item_record as i on
             i.record_id = h.record_id
-        join sierra_view.bib_record_item_record_link as brirl on brirl.item_record_id = i.record_id 
-        join sierra_view.bib_record_property as brp on brp.bib_record_id = brirl.bib_record_id 
+        join sierra_view.bib_record_item_record_link as brirl on brirl.item_record_id = i.record_id
+        join sierra_view.bib_record_property as brp on brp.bib_record_id = brirl.bib_record_id
         join sierra_view.patron_record as pr on
-            pr.record_id = h.patron_record_id 
+            pr.record_id = h.patron_record_id
         left outer join sierra_view.checkout as c on
             c.item_record_id = h.record_id  -- item is checked out or not
-        left outer join sierra_view.volume_record_item_record_link as vrirl on 
+        left outer join sierra_view.volume_record_item_record_link as vrirl on
             vrirl.item_record_id = h.record_id
     where
         (
@@ -156,7 +157,7 @@ with data as (
 select
     'item_on_shelf' as type,
     *
-from 
+from
     data
 where
     (
@@ -194,7 +195,7 @@ order by
 
 with get_cursor(dsn=dsn) as cursor:
     rows = execute_query_yield_rows(cursor, sql, None)
-    
+
     with open(filepath, 'w') as f:
         writer = csv.writer(f)
         columns = next(rows)
@@ -205,14 +206,23 @@ with get_cursor(dsn=dsn) as cursor:
                 print('.', end='')
         print(f'.done ({i+1})')
 
+# The name of the compressed file
+zip_name = filepath + ".zip"
+
+# Create a new ZIP file
+with zipfile.ZipFile(zip_name, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zipf:
+    # Add the CSV file to the ZIP file
+    zipf.write(filepath, arcname=os.path.basename(filepath))
+
+# Delete the original file after sending the email
+os.remove(filepath)
 
 send_email(
-    smtp_username=config['smtp_username'], 
-    smtp_password=config['smtp_password'], 
-    subject="Item-level Holds", 
-    message="See attached.", 
-    from_addr="ray.voelker@chpl.org", 
-    to_addr=config['send_list'], 
-    files=[filepath]
+    smtp_username=config['smtp_username'],
+    smtp_password=config['smtp_password'],
+    subject="Item-level Holds",
+    message="See attached.",
+    from_addr="ray.voelker@chpl.org",
+    to_addr=config['send_list'],
+    files=[zip_name]
 )
-
